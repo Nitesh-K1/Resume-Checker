@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+.Python
+
+# Logs
+*.log
+app.log
+
+# Streamlit
+.streamlit/secrets.toml
+
+# System files
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Others
+*.json
+*.sqlite3
