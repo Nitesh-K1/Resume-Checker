@@ -18,9 +18,11 @@ KNOWN_SKILLS = [
     "html", "css", "c++", "c#", "go", "php", "ruby"
 ]
 
+
 def extract_username_from_url(url):
     match = re.search(r"github\.com/([^/]+)/?$", url)
     return match.group(1) if match else None
+
 
 @st.cache_data(ttl=3600)
 def get_github_repos(username, token=None):
@@ -63,6 +65,7 @@ def get_github_repos(username, token=None):
         logging.error(f"GitHub Error: {e}")
         return []
 
+
 def extract_text(uploaded_file):
     try:
         if uploaded_file.name.endswith('.pdf'):
@@ -76,9 +79,11 @@ def extract_text(uploaded_file):
         logging.error(f"File Extraction Error: {e}")
         return ""
 
+
 def extract_skills(text):
     text_lower = text.lower()
     return [skill for skill in KNOWN_SKILLS if skill in text_lower]
+
 
 def analyze_candidate_fit(resume_text, github_repos, job_description):
     # Extract skills from all three sources
@@ -122,6 +127,7 @@ def analyze_candidate_fit(resume_text, github_repos, job_description):
         "resume_skills": list(resume_skills),
         "github_skills": list(github_skills)
     }
+
 
 def display_analysis_results(result):
     st.subheader("Candidate Fit Analysis")
@@ -184,12 +190,17 @@ def display_analysis_results(result):
         mime="application/json"
     )
 
+
 # Streamlit Interface
 st.title("Comprehensive Resume Analyzer")
 st.markdown("Analyze your resume against a job description and verify your skills with your GitHub profile.")
 
 resume_file = st.file_uploader("Upload Resume (PDF/DOCX/TXT)", type=["pdf", "docx", "txt"])
-job_description = st.text_area("Paste Job Description Here*", height=200, placeholder="e.g., 'We are looking for a Python developer with experience in Django...'")
+job_description = st.text_area(
+    "Paste Job Description Here*",
+    height=200,
+    placeholder="e.g., 'We are looking for a Python developer with experience in Django...'"
+)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -212,13 +223,11 @@ if st.button("Analyze"):
                 else:
                     st.subheader("Extracted Resume Text Preview")
                     st.text_area("Resume Text", resume_text, height=150)
-
                     github_repos = get_github_repos(username, github_token)
                     if not github_repos:
                         st.warning("No public repositories found or failed to fetch data.")
                     else:
                         # Run the new analysis
                         analysis_result = analyze_candidate_fit(resume_text, github_repos, job_description)
-
                         # Display the new, formatted results
                         display_analysis_results(analysis_result)

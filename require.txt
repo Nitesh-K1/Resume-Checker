@@ -1,2 +1,5 @@
-pip install spacy streamlit python-docx pdfplumber
-python -m spacy download en_core_web_sm
+spacy
+streamlit
+python-docx
+pdfplumber
+requests
