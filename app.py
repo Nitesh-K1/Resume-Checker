@@ -6,6 +6,7 @@ import requests
 import logging
 import re
 import json
+import base64
 
 nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 logging.basicConfig(filename="app.log", level=logging.ERROR)
@@ -23,7 +24,7 @@ def extract_username_from_url(url):
 
 @st.cache_data(ttl=3600)
 def get_github_repos(username, token=None):
-    headers = {"Accept": "application/vnd.github.mercy-preview+json"}
+    headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
@@ -33,14 +34,29 @@ def get_github_repos(username, token=None):
         repos = response.json()
         projects = []
         for repo in repos:
+            # Fetch topics
             topics_url = f"https://api.github.com/repos/{username}/{repo['name']}/topics"
-            topics_resp = requests.get(topics_url, headers=headers)
+            headers_topics = {"Accept": "application/vnd.github.mercy-preview+json"}
+            if token:
+                headers_topics["Authorization"] = f"Bearer {token}"
+            topics_resp = requests.get(topics_url, headers=headers_topics)
             topics = topics_resp.json().get("names", []) if topics_resp.status_code == 200 else []
+
+            # Fetch README
+            readme_url = f"https://api.github.com/repos/{username}/{repo['name']}/readme"
+            readme_resp = requests.get(readme_url, headers=headers)
+            readme_content = ""
+            if readme_resp.status_code == 200:
+                readme_data = readme_resp.json()
+                if 'content' in readme_data:
+                    readme_content = base64.b64decode(readme_data['content']).decode('utf-8')
+
             projects.append({
                 "name": repo.get("name", ""),
                 "description": repo.get("description", ""),
                 "language": repo.get("language", ""),
                 "topics": topics,
+                "readme": readme_content,
             })
         return projects
     except Exception as e:
@@ -64,58 +80,116 @@ def extract_skills(text):
     text_lower = text.lower()
     return [skill for skill in KNOWN_SKILLS if skill in text_lower]
 
-def extract_projects(text):
-    # Look for words after "project", "worked on", or "developed"
-    projects = set()
-    patterns = [
-        r'project\s*[:\-]\s*(.+)',
-        r'worked on\s+(.+)',
-        r'developed\s+(.+?)\s+(?:using|with|in|for)',
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        projects.update([m.strip().split('.')[0] for m in matches])
-    return list(projects)
+def analyze_candidate_fit(resume_text, github_repos, job_description):
+    # Extract skills from all three sources
+    resume_skills = set(extract_skills(resume_text))
+    job_skills = set(extract_skills(job_description))
 
-def analyze_resume_vs_github(resume_skills, resume_projects, github_repos):
-    matched_skills = set()
-    matched_projects = set()
-    github_languages = {repo["language"].lower() for repo in github_repos if repo["language"]}
-    github_repo_titles = {repo["name"].lower() for repo in github_repos}
+    github_skills = set()
+    for repo in github_repos:
+        # Combine all text from the repo to search for skills
+        repo_text = " ".join([
+            repo.get("name", ""),
+            repo.get("description", ""),
+            repo.get("language", ""),
+            " ".join(repo.get("topics", [])),
+            repo.get("readme", "")
+        ]).lower()
 
-    for skill in resume_skills:
-        if skill.lower() in github_languages:
-            matched_skills.add(skill)
+        for skill in KNOWN_SKILLS:
+            if skill in repo_text:
+                github_skills.add(skill)
 
-    for proj in resume_projects:
-        for repo_title in github_repo_titles:
-            if proj.lower() in repo_title:
-                matched_projects.add(proj)
+    # --- Analysis ---
+    # Skills the candidate has that are required for the job
+    matched_skills = resume_skills.intersection(job_skills)
+
+    # Skills required for the job that the candidate does not have on their resume
+    missing_skills = job_skills - resume_skills
+
+    # Skills on the resume that are also found on GitHub
+    verified_skills = resume_skills.intersection(github_skills)
+
+    # Skills on the resume that are NOT found on GitHub
+    unverified_skills = resume_skills - github_skills
 
     return {
         "matched_skills": list(matched_skills),
-        "unmatched_skills": list(set(resume_skills) - matched_skills),
-        "matched_projects": list(matched_projects),
-        "unmatched_projects": list(set(resume_projects) - matched_projects),
+        "missing_skills": list(missing_skills),
+        "verified_skills": list(verified_skills),
+        "unverified_skills": list(unverified_skills),
+        "job_skills": list(job_skills),
+        "resume_skills": list(resume_skills),
+        "github_skills": list(github_skills)
     }
 
-def evaluate_candidate(result):
-    total = len(result["matched_skills"]) + len(result["matched_projects"])
-    possible = total + len(result["unmatched_skills"]) + len(result["unmatched_projects"])
-    score_percent = (total / possible) * 100 if possible > 0 else 0
+def display_analysis_results(result):
+    st.subheader("Candidate Fit Analysis")
 
-    if score_percent >= 70:
-        return "✅ Good Fit", score_percent
-    elif score_percent >= 40:
-        return "⚠️ Partial Fit", score_percent
+    job_skills = result.get("job_skills", [])
+    resume_skills = result.get("resume_skills", [])
+    matched_skills = result.get("matched_skills", [])
+    missing_skills = result.get("missing_skills", [])
+    verified_skills = result.get("verified_skills", [])
+    unverified_skills = result.get("unverified_skills", [])
+
+    # --- Scoring ---
+    score = 0
+    if job_skills:
+        score = (len(matched_skills) / len(job_skills)) * 100
+
+    # --- Display Score and Summary ---
+    st.progress(int(score) / 100)
+    if score >= 75:
+        st.success(f"**Excellent Fit!** (Score: {score:.2f}%)")
+    elif score >= 50:
+        st.info(f"**Good Fit.** (Score: {score:.2f}%)")
+    elif score >= 25:
+        st.warning(f"**Partial Fit.** (Score: {score:.2f}%)")
     else:
-        return "❌ Not a Fit", score_percent
+        st.error(f"**Not a Strong Fit.** (Score: {score:.2f}%)")
+
+    # --- Detailed Breakdown ---
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### Job Skill Match")
+        st.metric("Required Skills Met", f"{len(matched_skills)} / {len(job_skills)}")
+        if matched_skills:
+            st.markdown("✅ **Matched Skills:**")
+            st.write(", ".join(sorted(matched_skills)))
+        if missing_skills:
+            st.markdown("❌ **Missing Skills:**")
+            st.write(", ".join(sorted(missing_skills)))
+
+    with col2:
+        st.markdown("#### GitHub Verification")
+        st.metric("Resume Skills Verified", f"{len(verified_skills)} / {len(resume_skills)}")
+        if verified_skills:
+            st.markdown("✅ **Verified Skills:**")
+            st.write(", ".join(sorted(verified_skills)))
+        if unverified_skills:
+            st.markdown("⚠️ **Unverified Skills:**")
+            st.write(", ".join(sorted(unverified_skills)))
+
+    # --- Expander for Full Details ---
+    with st.expander("Show Detailed Skill Lists"):
+        st.json(result)
+
+    # --- Download Button ---
+    st.download_button(
+        "Download Full Report (JSON)",
+        data=json.dumps(result, indent=2),
+        file_name="candidate_analysis_report.json",
+        mime="application/json"
+    )
 
 # Streamlit Interface
-st.title("Resume vs GitHub Analyzer - Fit Checker")
-st.markdown("Upload your resume and check if your GitHub aligns with your claimed skills and projects.")
+st.title("Comprehensive Resume Analyzer")
+st.markdown("Analyze your resume against a job description and verify your skills with your GitHub profile.")
 
 resume_file = st.file_uploader("Upload Resume (PDF/DOCX/TXT)", type=["pdf", "docx", "txt"])
+job_description = st.text_area("Paste Job Description Here*", height=200, placeholder="e.g., 'We are looking for a Python developer with experience in Django...'")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -124,8 +198,8 @@ with col2:
     github_token = st.text_input("GitHub Token (Optional)", type="password")
 
 if st.button("Analyze"):
-    if not resume_file or not github_url:
-        st.warning("Please upload a resume and provide a valid GitHub profile URL.")
+    if not resume_file or not github_url or not job_description:
+        st.warning("Please upload a resume, paste a job description, and provide a valid GitHub profile URL.")
     else:
         username = extract_username_from_url(github_url)
         if not username:
@@ -137,36 +211,14 @@ if st.button("Analyze"):
                     st.error("Unable to extract text from the uploaded file.")
                 else:
                     st.subheader("Extracted Resume Text Preview")
-                    st.text_area("Resume Text", resume_text, height=250)
+                    st.text_area("Resume Text", resume_text, height=150)
+
                     github_repos = get_github_repos(username, github_token)
                     if not github_repos:
                         st.warning("No public repositories found or failed to fetch data.")
                     else:
-                        resume_skills = extract_skills(resume_text)
-                        resume_projects = extract_projects(resume_text)
-                        analysis_result = analyze_resume_vs_github(resume_skills, resume_projects, github_repos)
-                        fit_status, score = evaluate_candidate(analysis_result)
+                        # Run the new analysis
+                        analysis_result = analyze_candidate_fit(resume_text, github_repos, job_description)
 
-                        st.subheader("Candidate Fit Result")
-                        st.write(f"**{fit_status}** — Score: **{score:.2f}%**")
-                        st.metric("Matched Skills", len(analysis_result["matched_skills"]))
-                        st.metric("Matched Projects", len(analysis_result["matched_projects"]))
-                        st.markdown("**Matched Skills:**")
-                        st.write(", ".join(analysis_result["matched_skills"]) or "None")
-                        st.markdown("**Unmatched Skills:**")
-                        st.write(", ".join(analysis_result["unmatched_skills"]) or "None")
-                        st.markdown("**Matched Projects:**")
-                        st.write(", ".join(analysis_result["matched_projects"]) or "None")
-                        st.markdown("**Unmatched Projects:**")
-                        st.write(", ".join(analysis_result["unmatched_projects"]) or "None")
-
-                        st.download_button(
-                            "Download Result as JSON",
-                            data=json.dumps({
-                                "fit_status": fit_status,
-                                "score": score,
-                                **analysis_result
-                            }, indent=2),
-                            file_name="fit_analysis_result.json",
-                            mime="application/json"
-                        )
+                        # Display the new, formatted results
+                        display_analysis_results(analysis_result)
